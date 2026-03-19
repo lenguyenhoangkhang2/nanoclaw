@@ -24,6 +24,7 @@ import {
   hostGatewayArgs,
   readonlyMountArgs,
   stopContainer,
+  usernsArgs,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
@@ -218,6 +219,9 @@ function buildContainerArgs(
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
+  // Disable SELinux labeling for bind mounts (needed on Fedora/RHEL with Podman)
+  args.push('--security-opt', 'label=disable');
+
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
@@ -240,6 +244,9 @@ function buildContainerArgs(
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
+
+  // Rootless Podman: keep host UID mapping so bind-mounted files are writable
+  args.push(...usernsArgs());
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),

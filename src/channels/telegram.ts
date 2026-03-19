@@ -19,9 +19,47 @@ export interface TelegramChannelOpts {
 }
 
 /**
- * Send a message with Telegram Markdown parse mode, falling back to plain text.
- * Claude's output naturally matches Telegram's Markdown v1 format:
- *   *bold*, _italic_, `code`, ```code blocks```, [links](url)
+ * Convert Claude's standard Markdown to Telegram HTML.
+ * Telegram HTML supports: <b>, <i>, <code>, <pre>, <a href="">
+ */
+function markdownToTelegramHtml(text: string): string {
+  // Escape HTML special chars first (before adding tags)
+  let out = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  // Fenced code blocks (```lang\ncode\n```) → <pre><code>
+  out = out.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code) => {
+    return `<pre><code>${code.trimEnd()}</code></pre>`;
+  });
+
+  // Inline code → <code>
+  out = out.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+  // Bold **text** or __text__ → <b>
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
+  out = out.replace(/__([^_\n]+)__/g, '<b>$1</b>');
+
+  // Italic *text* (not list bullets) or _text_ → <i>
+  out = out.replace(/(?<![*\w])\*([^*\n]+)\*(?![*\w])/g, '<i>$1</i>');
+  out = out.replace(/(?<![_\w])_([^_\n]+)_(?![_\w])/g, '<i>$1</i>');
+
+  // Headers # → <b>text</b> (strip the # prefix)
+  out = out.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
+
+  // Links [text](url) → <a href="url">text</a>
+  out = out.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
+    '<a href="$2">$1</a>',
+  );
+
+  return out;
+}
+
+/**
+ * Send a message using Telegram HTML parse mode, falling back to plain text.
+ * Converts Claude's standard Markdown to Telegram HTML before sending.
  */
 async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
@@ -29,14 +67,15 @@ async function sendTelegramMessage(
   text: string,
   options: { message_thread_id?: number } = {},
 ): Promise<void> {
+  const html = markdownToTelegramHtml(text);
   try {
-    await api.sendMessage(chatId, text, {
+    await api.sendMessage(chatId, html, {
       ...options,
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
     });
   } catch (err) {
-    // Fallback: send as plain text if Markdown parsing fails
-    logger.debug({ err }, 'Markdown send failed, falling back to plain text');
+    // Fallback: send as plain text if HTML parsing fails
+    logger.debug({ err }, 'HTML send failed, falling back to plain text');
     await api.sendMessage(chatId, text, options);
   }
 }
@@ -54,11 +93,22 @@ export class TelegramChannel implements Channel {
   }
 
   async connect(): Promise<void> {
+    // Use a dedicated agent with enough sockets so long-polling (getUpdates)
+    // does not block concurrent sendMessage calls.
+    const agent = new https.Agent({ keepAlive: true, maxSockets: 10 });
     this.bot = new Bot(this.botToken, {
       client: {
-        baseFetchConfig: { agent: https.globalAgent, compress: true },
+        baseFetchConfig: { agent, compress: true },
       },
     });
+
+    // Break any existing long-polling session from a previous run.
+    // getUpdates with timeout=0 forces Telegram to drop an active polling connection.
+    try {
+      await this.bot.api.getUpdates({ offset: -1, timeout: 0 });
+    } catch {
+      // Ignore errors — this is best-effort
+    }
 
     // Command to get chat ID (useful for registration)
     this.bot.command('chatid', (ctx) => {

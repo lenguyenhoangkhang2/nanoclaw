@@ -40,11 +40,37 @@ function detectProxyBindHost(): string {
   return '0.0.0.0';
 }
 
+/** Detect if the runtime is Podman (even when invoked as 'docker'). */
+export function isPodman(): boolean {
+  try {
+    const info = execSync(`${CONTAINER_RUNTIME_BIN} info`, {
+      stdio: 'pipe',
+      encoding: 'utf-8',
+      timeout: 5000,
+    });
+    return info.toLowerCase().includes('podman');
+  } catch {
+    return false;
+  }
+}
+
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
   // On Linux, host.docker.internal isn't built-in — add it explicitly
   if (os.platform() === 'linux') {
     return ['--add-host=host.docker.internal:host-gateway'];
+  }
+  return [];
+}
+
+/**
+ * User namespace args for rootless Podman.
+ * --userns=keep-id maps host UID → same UID inside the container,
+ * so bind-mounted files owned by the host user are writable by the container user.
+ */
+export function usernsArgs(): string[] {
+  if (isPodman()) {
+    return ['--userns=keep-id'];
   }
   return [];
 }
